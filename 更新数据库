@@ -1,0 +1,109 @@
+import requests
+import json
+import pyodbc  # 导入 pyodbc 库
+from 登录 import post_request  # 导入登录模块
+
+# 登录并获取会话信息
+login_result = post_request()
+if "error" in login_result:
+    print("登录失败:", login_result["error"])
+    exit()
+
+cookies = login_result.get("cookies", {})
+if not cookies:
+    print("未获取到会话信息，请检查登录接口")
+    exit()
+
+# 金蝶 WebAPI 接口地址
+url = "http://192.168.2.229/k3cloud/Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.ExecuteBillQuery.common.kdsvc"
+
+# 请求头
+headers = {
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+}
+
+# 请求参数
+payload = {
+    "parameters": [
+        {
+            "FormId": "PUR_PurchaseOrder",  # 表单标识
+            "TopRowCount": 0,              # 返回的最大行数
+            "Limit": 0,                   # 限制返回的记录数
+            "StartRow": 0,                 # 起始行
+            "FilterString": "",  # 过滤条件FDocumentStatus = 'A'
+            "OrderString": "FID DESC",     # 排序规则
+            "FieldKeys": "FID,FBillNo,FPOOrderEntry_FEntryID,FSrcBillNo,FDemandBillNo,FDocumentStatus"  # 返回字段
+        }
+    ]
+}
+
+# 数据库连接配置
+db_config = {
+    "server": "localhost",  # SQL Server 地址
+    "database": "k3cloud",  # 数据库名称
+    "username": "SS",  # 数据库用户名
+    "password": "888888",  # 数据库密码
+}
+
+# 发送 POST 请求
+try:
+    response = requests.post(url, headers=headers, cookies=cookies, data=json.dumps(payload))
+    response.raise_for_status()  # 检查请求是否成功
+    result = response.json()    # 解析响应为 JSON
+
+    # 打印查询结果
+    print("查询结果:", json.dumps(result, indent=4, ensure_ascii=False))
+
+    # 连接 SQL Server 数据库
+    conn_str = (
+        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+        f"SERVER={db_config['server']};"
+        f"DATABASE={db_config['database']};"
+        f"UID={db_config['username']};"
+        f"PWD={db_config['password']};"
+    )
+    conn = pyodbc.connect(conn_str)
+    cursor = conn.cursor()
+
+    # 插入或更新数据的 SQL 语句
+    upsert_sql = """
+        MERGE INTO PurchaseOrders AS target
+        USING (SELECT ? AS FID, ? AS FBillNo, ? AS FEntryID, ? AS FSrcBillNo, ? AS FDemandBillNo, ? AS FDocumentStatus) AS source
+        ON target.FEntryID = source.FEntryID
+        WHEN MATCHED THEN
+            UPDATE SET
+                FID = source.FID,
+                FBillNo = source.FBillNo,
+                FSrcBillNo = source.FSrcBillNo,
+                FDemandBillNo = source.FDemandBillNo,
+                FDocumentStatus = source.FDocumentStatus
+        WHEN NOT MATCHED THEN
+            INSERT (FID, FBillNo, FEntryID, FSrcBillNo, FDemandBillNo, FDocumentStatus)
+            VALUES (source.FID, source.FBillNo, source.FEntryID, source.FSrcBillNo, source.FDemandBillNo, source.FDocumentStatus);
+    """
+
+    # 遍历查询结果并插入或更新到数据库
+    if not result:
+        print("查询结果为空，无法插入或更新数据库")
+        exit()
+
+    for row in result:
+        try:
+            print("处理数据:", row)  # 打印每一行数据
+            cursor.execute(upsert_sql, row)
+        except pyodbc.Error as db_err:
+            print("操作失败:", db_err.args)
+
+    # 提交事务
+    conn.commit()
+    print("数据插入或更新成功！")
+
+except requests.exceptions.RequestException as e:
+    print("请求失败:", e)
+except pyodbc.Error as db_err:
+    print("数据库操作失败:", db_err)
+finally:
+    # 关闭数据库连接
+    if 'conn' in locals():
+        conn.close()
